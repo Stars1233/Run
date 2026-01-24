@@ -1143,4 +1143,501 @@ class TestDGXCloudExecutor:
         assert headers["Content-Type"] == "application/json"
         assert "Authorization" in headers
         assert headers["Authorization"] == "Bearer test_token"
-        assert headers["Authorization"] == "Bearer test_token"
+
+    def test_setup_launcher_no_launcher(self):
+        """Test _setup_launcher when no launcher is set."""
+        executor = DGXCloudExecutor(
+            base_url="https://dgxapi.example.com",
+            kube_apiserver_url="https://127.0.0.1:443",
+            app_id="test_app_id",
+            app_secret="test_app_secret",
+            project_name="test_project",
+            container_image="nvcr.io/nvidia/test:latest",
+            pvc_nemo_run_dir="/workspace/nemo_run",
+            nprocs_per_node=8,
+        )
+
+        # Set up job details required by _setup_launcher
+        executor.job_name = "test_job"
+        executor.job_dir = "/workspace/test_job"
+
+        with patch("nemo_run.core.execution.dgxcloud.CONSOLE"):
+            executor._setup_launcher()
+
+        # When no launcher, torchrun_nproc_per_node and ntasks_per_node should not be modified
+        # ntasks_per_node is only set when launcher is Torchrun or FaultTolerance
+        assert (
+            not hasattr(executor, "torchrun_nproc_per_node")
+            or executor.torchrun_nproc_per_node is None
+        )
+
+    def test_setup_launcher_with_torchrun(self):
+        """Test _setup_launcher with Torchrun launcher."""
+        from nemo_run.core.execution.launcher import Torchrun
+
+        executor = DGXCloudExecutor(
+            base_url="https://dgxapi.example.com",
+            kube_apiserver_url="https://127.0.0.1:443",
+            app_id="test_app_id",
+            app_secret="test_app_secret",
+            project_name="test_project",
+            container_image="nvcr.io/nvidia/test:latest",
+            pvc_nemo_run_dir="/workspace/nemo_run",
+            nprocs_per_node=8,
+            launcher=Torchrun(),
+        )
+
+        executor.job_name = "test_job"
+        executor.job_dir = "/workspace/test_job"
+
+        with patch("nemo_run.core.execution.dgxcloud.CONSOLE") as mock_console:
+            executor._setup_launcher()
+
+        # With Torchrun, ntasks_per_node should be 1 and torchrun_nproc_per_node should be nprocs_per_node
+        assert executor.ntasks_per_node == 1
+        assert executor.torchrun_nproc_per_node == 8
+        mock_console.log.assert_called_once()
+        assert "Torchrun" in mock_console.log.call_args[0][0]
+
+    def test_setup_launcher_with_fault_tolerance(self):
+        """Test _setup_launcher with FaultTolerance launcher."""
+        from nemo_run.core.execution.launcher import FaultTolerance
+
+        ft_launcher = FaultTolerance()
+        executor = DGXCloudExecutor(
+            base_url="https://dgxapi.example.com",
+            kube_apiserver_url="https://127.0.0.1:443",
+            app_id="test_app_id",
+            app_secret="test_app_secret",
+            project_name="test_project",
+            container_image="nvcr.io/nvidia/test:latest",
+            pvc_nemo_run_dir="/workspace/nemo_run",
+            nprocs_per_node=4,
+            launcher=ft_launcher,
+        )
+
+        executor.job_name = "my_ft_job"
+        executor.job_dir = "/workspace/jobs/my_ft_job"
+
+        with patch("nemo_run.core.execution.dgxcloud.CONSOLE") as mock_console:
+            with patch("nemo_run.config.RUNDIR_NAME", "nemo_run"):
+                executor._setup_launcher()
+
+        # Verify Torchrun settings
+        assert executor.ntasks_per_node == 1
+        assert executor.torchrun_nproc_per_node == 4
+
+        # Verify FaultTolerance paths are set
+        assert ft_launcher.cfg_path == "/workspace/jobs/my_ft_job/my_ft_job/my_ft_job_ft_cfg.yml"
+        assert ft_launcher.finished_flag_file == "/nemo_run/my_ft_job_finished_flag"
+        assert (
+            ft_launcher.job_results_file
+            == "/workspace/jobs/my_ft_job/my_ft_job/my_ft_job_job_results"
+        )
+
+        # Verify console log was called
+        mock_console.log.assert_called_once()
+        assert "FaultTolerance" in mock_console.log.call_args[0][0]
+
+    def test_setup_launcher_fault_tolerance_paths(self):
+        """Test that FaultTolerance paths are correctly constructed."""
+        from nemo_run.core.execution.launcher import FaultTolerance
+
+        ft_launcher = FaultTolerance()
+        executor = DGXCloudExecutor(
+            base_url="https://dgxapi.example.com",
+            kube_apiserver_url="https://127.0.0.1:443",
+            app_id="test_app_id",
+            app_secret="test_app_secret",
+            project_name="test_project",
+            container_image="nvcr.io/nvidia/test:latest",
+            pvc_nemo_run_dir="/workspace/nemo_run",
+            launcher=ft_launcher,
+        )
+
+        executor.job_name = "test_training"
+        executor.job_dir = "/mnt/workspace/test_training"
+
+        with patch("nemo_run.core.execution.dgxcloud.CONSOLE"):
+            with patch("nemo_run.core.execution.dgxcloud.RUNDIR_NAME", "custom_rundir"):
+                executor._setup_launcher()
+
+        # Check path construction
+        base_dir = "/mnt/workspace/test_training/test_training"
+        assert ft_launcher.cfg_path == f"{base_dir}/test_training_ft_cfg.yml"
+        assert ft_launcher.finished_flag_file == "/custom_rundir/test_training_finished_flag"
+        assert ft_launcher.job_results_file == f"{base_dir}/test_training_job_results"
+
+    def test_setup_launcher_with_different_nprocs(self):
+        """Test _setup_launcher with different nprocs_per_node values."""
+        from nemo_run.core.execution.launcher import Torchrun
+
+        for nprocs in [1, 2, 4, 8, 16]:
+            executor = DGXCloudExecutor(
+                base_url="https://dgxapi.example.com",
+                kube_apiserver_url="https://127.0.0.1:443",
+                app_id="test_app_id",
+                app_secret="test_app_secret",
+                project_name="test_project",
+                container_image="nvcr.io/nvidia/test:latest",
+                pvc_nemo_run_dir="/workspace/nemo_run",
+                nprocs_per_node=nprocs,
+                launcher=Torchrun(),
+            )
+
+            executor.job_name = "test_job"
+            executor.job_dir = "/workspace/test_job"
+
+            with patch("nemo_run.core.execution.dgxcloud.CONSOLE"):
+                executor._setup_launcher()
+
+            assert executor.torchrun_nproc_per_node == nprocs
+            assert executor.ntasks_per_node == 1
+
+    def test_setup_launcher_super_called(self):
+        """Test that _setup_launcher calls super()._setup_launcher()."""
+        from nemo_run.core.execution.launcher import Torchrun
+
+        executor = DGXCloudExecutor(
+            base_url="https://dgxapi.example.com",
+            kube_apiserver_url="https://127.0.0.1:443",
+            app_id="test_app_id",
+            app_secret="test_app_secret",
+            project_name="test_project",
+            container_image="nvcr.io/nvidia/test:latest",
+            pvc_nemo_run_dir="/workspace/nemo_run",
+            launcher=Torchrun(),
+        )
+
+        executor.job_name = "test_job"
+        executor.job_dir = "/workspace/test_job"
+
+        with patch("nemo_run.core.execution.dgxcloud.CONSOLE"):
+            with patch.object(
+                executor.__class__.__bases__[0], "_setup_launcher"
+            ) as mock_super_setup:
+                executor._setup_launcher()
+
+                # Verify super() was called
+                mock_super_setup.assert_called_once()
+
+
+class TestDGXCloudRequest:
+    """Test DGXCloudRequest dataclass and its methods."""
+
+    @pytest.fixture
+    def basic_executor(self):
+        """Create a basic DGXCloudExecutor for testing."""
+        return DGXCloudExecutor(
+            base_url="https://dgxapi.example.com",
+            kube_apiserver_url="https://127.0.0.1:443",
+            app_id="test_app_id",
+            app_secret="test_app_secret",
+            project_name="test_project",
+            container_image="nvcr.io/nvidia/test:latest",
+            pvc_nemo_run_dir="/workspace/nemo_run",
+        )
+
+    @pytest.fixture
+    def executor_with_env_vars(self):
+        """Create a DGXCloudExecutor with environment variables."""
+        return DGXCloudExecutor(
+            base_url="https://dgxapi.example.com",
+            kube_apiserver_url="https://127.0.0.1:443",
+            app_id="test_app_id",
+            app_secret="test_app_secret",
+            project_name="test_project",
+            container_image="nvcr.io/nvidia/test:latest",
+            pvc_nemo_run_dir="/workspace/nemo_run",
+            env_vars={"EXECUTOR_VAR": "executor_value", "SHARED_VAR": "from_executor"},
+        )
+
+    def test_dgxcloud_request_init(self, basic_executor):
+        """Test basic initialization of DGXCloudRequest."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1", "job2"],
+            executor=basic_executor,
+            max_retries=3,
+            extra_env={"EXTRA_VAR": "extra_value"},
+        )
+
+        assert request.launch_cmd == ["python", "train.py"]
+        assert request.jobs == ["job1", "job2"]
+        assert request.executor == basic_executor
+        assert request.max_retries == 3
+        assert request.extra_env == {"EXTRA_VAR": "extra_value"}
+        assert request.launcher is None
+
+    def test_dgxcloud_request_with_launcher(self, basic_executor):
+        """Test DGXCloudRequest with a launcher."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+        from nemo_run.core.execution.launcher import Torchrun
+
+        launcher = Torchrun()
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1"],
+            executor=basic_executor,
+            max_retries=5,
+            extra_env={},
+            launcher=launcher,
+        )
+
+        assert request.launcher == launcher
+        assert isinstance(request.launcher, Torchrun)
+
+    def test_materialize_basic(self, basic_executor):
+        """Test materialization of a basic request without fault tolerance."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py", "--epochs", "10"],
+            jobs=["job1"],
+            executor=basic_executor,
+            max_retries=3,
+            extra_env={"MY_VAR": "my_value"},
+        )
+
+        with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+            mock_fill.return_value = "#!/bin/bash\necho 'test script'"
+            script = request.materialize()
+
+            # Verify fill_template was called
+            mock_fill.assert_called_once()
+            args, kwargs = mock_fill.call_args
+            assert args[0] == "dgxc.sh.j2"
+
+            template_vars = args[1]
+            assert template_vars["max_retries"] == 3
+            assert template_vars["training_command"] == "python train.py --epochs 10"
+            assert template_vars["ft_enabled"] is False
+            assert "export MY_VAR=my_value" in template_vars["env_vars"]
+
+            assert script == "#!/bin/bash\necho 'test script'"
+
+    def test_materialize_with_env_vars(self, executor_with_env_vars):
+        """Test that environment variables from executor and extra_env are merged."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1"],
+            executor=executor_with_env_vars,
+            max_retries=1,
+            extra_env={"EXTRA_VAR": "extra_value", "SHARED_VAR": "from_extra"},
+        )
+
+        with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+            mock_fill.return_value = "mock_script"
+            request.materialize()
+
+            template_vars = mock_fill.call_args[0][1]
+            env_vars = template_vars["env_vars"]
+
+            # Check that variables are present (order may vary due to dict merge)
+            assert "export EXECUTOR_VAR=executor_value" in env_vars
+            assert "export EXTRA_VAR=extra_value" in env_vars
+            # extra_env should override executor.env_vars for SHARED_VAR
+            assert "export SHARED_VAR=from_extra" in env_vars
+            assert "export SHARED_VAR=from_executor" not in env_vars
+
+    def test_materialize_with_fault_tolerance(self, basic_executor):
+        """Test materialization with fault tolerance enabled."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+        from nemo_run.core.execution.launcher import FaultTolerance
+
+        ft_launcher = FaultTolerance(
+            cfg_path="/workspace/ft_config.yaml",
+            finished_flag_file="/workspace/.ft_finished",
+            job_results_file="/workspace/ft_results.json",
+        )
+
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1"],
+            executor=basic_executor,
+            max_retries=5,
+            extra_env={},
+            launcher=ft_launcher,
+        )
+
+        with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+            mock_fill.return_value = "ft_script"
+            _ = request.materialize()
+
+            template_vars = mock_fill.call_args[0][1]
+            assert template_vars["ft_enabled"] is True
+            assert template_vars["fault_tol_cfg_path"] == "/workspace/ft_config.yaml"
+            assert template_vars["fault_tol_finished_flag_file"] == "/workspace/.ft_finished"
+            assert template_vars["fault_tol_job_results_file"] == "/workspace/ft_results.json"
+
+    def test_materialize_fault_tolerance_missing_fields(self, basic_executor):
+        """Test that fault tolerance with missing required fields raises an error."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+        from nemo_run.core.execution.launcher import FaultTolerance
+
+        # Create FaultTolerance with missing required fields
+        ft_launcher = FaultTolerance(
+            cfg_path="/workspace/ft_config.yaml",
+            # Missing finished_flag_file and job_results_file
+        )
+
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1"],
+            executor=basic_executor,
+            max_retries=5,
+            extra_env={},
+            launcher=ft_launcher,
+        )
+
+        with pytest.raises(AssertionError) as exc_info:
+            with patch("nemo_run.core.execution.dgxcloud.fill_template"):
+                request.materialize()
+
+        assert "Fault Tolerance requires" in str(exc_info.value)
+
+    def test_materialize_with_non_fault_tolerance_launcher(self, basic_executor):
+        """Test materialization with a non-FaultTolerance launcher (e.g., Torchrun)."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+        from nemo_run.core.execution.launcher import Torchrun
+
+        launcher = Torchrun()
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1"],
+            executor=basic_executor,
+            max_retries=2,
+            extra_env={},
+            launcher=launcher,
+        )
+
+        with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+            mock_fill.return_value = "torchrun_script"
+            _ = request.materialize()
+
+            template_vars = mock_fill.call_args[0][1]
+            # FT should be disabled for non-FaultTolerance launchers
+            assert template_vars["ft_enabled"] is False
+            # FT-specific fields should not be in template_vars
+            assert "fault_tol_cfg_path" not in template_vars
+            assert "fault_tol_finished_flag_file" not in template_vars
+            assert "fault_tol_job_results_file" not in template_vars
+
+    def test_materialize_empty_extra_env(self, basic_executor):
+        """Test materialization with empty extra_env."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1"],
+            executor=basic_executor,
+            max_retries=1,
+            extra_env={},
+        )
+
+        with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+            mock_fill.return_value = "script"
+            request.materialize()
+
+            template_vars = mock_fill.call_args[0][1]
+            assert template_vars["env_vars"] == []
+
+    def test_materialize_uppercase_env_vars(self, basic_executor):
+        """Test that environment variable keys are uppercased."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1"],
+            executor=basic_executor,
+            max_retries=1,
+            extra_env={"lowercase_var": "value", "MixedCase": "value2"},
+        )
+
+        with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+            mock_fill.return_value = "script"
+            request.materialize()
+
+            template_vars = mock_fill.call_args[0][1]
+            env_vars = template_vars["env_vars"]
+
+            # Keys should be uppercased
+            assert "export LOWERCASE_VAR=value" in env_vars
+            assert "export MIXEDCASE=value2" in env_vars
+
+    def test_repr(self, basic_executor):
+        """Test the __repr__ method."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+
+        request = DGXCloudRequest(
+            launch_cmd=["python", "train.py"],
+            jobs=["job1", "job2"],
+            executor=basic_executor,
+            max_retries=3,
+            extra_env={},
+        )
+
+        with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+            mock_fill.return_value = "#!/bin/bash\necho 'script content'"
+            repr_str = repr(request)
+
+            assert "# DGXC Entrypoint Script Request" in repr_str
+            assert "# Executor: DGXCloudExecutor" in repr_str
+            assert "# Jobs: ['job1', 'job2']" in repr_str
+            assert "#!/bin/bash" in repr_str
+            assert "echo 'script content'" in repr_str
+
+    def test_complex_launch_command(self, basic_executor):
+        """Test materialization with a complex multi-argument launch command."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+
+        request = DGXCloudRequest(
+            launch_cmd=[
+                "torchrun",
+                "--nproc_per_node=8",
+                "--nnodes=2",
+                "train.py",
+                "--batch-size",
+                "32",
+                "--lr",
+                "0.001",
+            ],
+            jobs=["job1"],
+            executor=basic_executor,
+            max_retries=1,
+            extra_env={},
+        )
+
+        with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+            mock_fill.return_value = "script"
+            request.materialize()
+
+            template_vars = mock_fill.call_args[0][1]
+            expected_cmd = (
+                "torchrun --nproc_per_node=8 --nnodes=2 train.py --batch-size 32 --lr 0.001"
+            )
+            assert template_vars["training_command"] == expected_cmd
+
+    def test_max_retries_values(self, basic_executor):
+        """Test different max_retries values."""
+        from nemo_run.core.execution.dgxcloud import DGXCloudRequest
+
+        for retries in [0, 1, 10, 100]:
+            request = DGXCloudRequest(
+                launch_cmd=["python", "train.py"],
+                jobs=["job1"],
+                executor=basic_executor,
+                max_retries=retries,
+                extra_env={},
+            )
+
+            with patch("nemo_run.core.execution.dgxcloud.fill_template") as mock_fill:
+                mock_fill.return_value = "script"
+                request.materialize()
+
+                template_vars = mock_fill.call_args[0][1]
+                assert template_vars["max_retries"] == retries
