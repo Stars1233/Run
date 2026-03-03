@@ -278,6 +278,19 @@ class SlurmRayRequest:
 
             return " ".join(_srun_flags)
 
+        def get_command_srun_args() -> str:
+            if (
+                self.executor.run_as_group
+                and self.executor.heterogeneous
+                and self.executor.resource_group
+                and self.executor.resource_group[0].srun_args is not None
+            ):
+                command_srun_args = self.executor.resource_group[0].srun_args
+            else:
+                command_srun_args = self.executor.srun_args or []
+
+            return " ".join(shlex.quote(arg) for arg in command_srun_args)
+
         ray_log_prefix = job_details.ray_log_prefix
         vars_to_fill = {
             "sbatch_flags": sbatch_flags,
@@ -296,6 +309,7 @@ class SlurmRayRequest:
             "ray_log_prefix": ray_log_prefix,
             "heterogeneous": self.executor.heterogeneous,
             "resource_group": self.executor.resource_group if self.executor.heterogeneous else [],
+            "command_srun_args": get_command_srun_args(),
         }
 
         if self.command_groups:
